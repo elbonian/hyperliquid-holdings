@@ -7,7 +7,7 @@
     <application
         android:allowBackup="false"
         android:label="Hyperliquid Holdings"
-        android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+        android:theme="@android:style/Theme.Material.NoActionBar">
         <activity
             android:name=".MainActivity"
             android:exported="true">

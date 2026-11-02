@@ -1,12 +1,20 @@
 package com.marcel.hyperliquid
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -25,10 +33,12 @@ import java.util.Locale
 import java.util.TimeZone
 
 /**
- * Version 1.2: the Hyperliquid holdings check, plus a searchable,
- * editable tracked list. The baseline is dynamic: the most recent
- * regular-session close (1pm PT / 20:00 UTC on a weekday), so weekends
- * still show Friday's close but a Tuesday night shows Tuesday's close.
+ * Version 1.3: UI/UX polish only. Every behavior from v1.2 is unchanged:
+ * the same screen, data, and actions, with a dark trading-terminal look,
+ * card rows, percent pills with direction arrows, animated refreshes,
+ * pull-to-refresh, an inline error banner with retry, a designed empty
+ * state, and search-field polish (clear button, search action, keyboard
+ * dismissal on pick).
  *
  * API behavior mirrors scripts/hyperliquid_weekend.py, except the
  * baseline timestamp (see mostRecentSessionClose20Utc):
@@ -62,12 +72,22 @@ class MainActivity : Activity() {
     private val prefsKeyTracked = "tracked"
     private val defaultTracked = listOf("SMH", "TSLA", "SPCX", "XBI", "DRAM", "BTC")
 
+    // Dark terminal palette.
+    private val colText = Color.parseColor("#E8ECF1")
+    private val colMuted = Color.parseColor("#8A94A6")
+    private val colGreen = Color.parseColor("#3DDC84")
+    private val colRed = Color.parseColor("#FF6B7A")
+
+    private lateinit var pullScroll: PullScrollView
+    private lateinit var pullIndicator: TextView
     private lateinit var titleText: TextView
     private lateinit var asOfText: TextView
     private lateinit var errorText: TextView
+    private lateinit var emptyState: TextView
     private lateinit var rowsContainer: LinearLayout
     private lateinit var refreshButton: Button
     private lateinit var searchField: EditText
+    private lateinit var clearSearchButton: TextView
     private lateinit var searchStatus: TextView
     private lateinit var searchResults: LinearLayout
 
@@ -81,23 +101,58 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        pullScroll = findViewById(R.id.pullScroll)
+        pullIndicator = findViewById(R.id.pullIndicator)
         asOfText = findViewById(R.id.asOfText)
         titleText = findViewById(R.id.titleText)
         errorText = findViewById(R.id.errorText)
+        emptyState = findViewById(R.id.emptyState)
         rowsContainer = findViewById(R.id.rowsContainer)
         refreshButton = findViewById(R.id.refreshButton)
         searchField = findViewById(R.id.searchField)
+        clearSearchButton = findViewById(R.id.clearSearchButton)
         searchStatus = findViewById(R.id.searchStatus)
         searchResults = findViewById(R.id.searchResults)
         refreshButton.setOnClickListener { fetch() }
+        errorText.setOnClickListener { fetch() }
+        clearSearchButton.setOnClickListener { searchField.setText("") }
+        searchField.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                hideKeyboard()
+                true
+            } else {
+                false
+            }
+        }
         searchField.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
-                onSearchTextChanged(s?.toString() ?: "")
+                val text = s?.toString() ?: ""
+                clearSearchButton.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+                onSearchTextChanged(text)
             }
         })
+        pullScroll.onPullProgress = { pulling, beyond ->
+            if (pulling) {
+                pullIndicator.visibility = View.VISIBLE
+                pullIndicator.text = if (beyond) "Release to refresh" else "Pull to refresh"
+            } else {
+                pullIndicator.visibility = View.GONE
+            }
+        }
+        pullScroll.onPullRefresh = {
+            // Same action as the Refresh button, guarded the same way.
+            if (refreshButton.isEnabled) fetch()
+        }
         fetch()
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun hideKeyboard() {
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(searchField.windowToken, 0)
     }
 
     // --- Tracked list persistence ---
@@ -125,6 +180,8 @@ class MainActivity : Activity() {
 
     private fun fetch() {
         refreshButton.isEnabled = false
+        pullIndicator.visibility = View.GONE
+        emptyState.visibility = View.GONE
         errorText.visibility = View.GONE
         rowsContainer.removeAllViews()
         asOfText.text = "Loading..."
@@ -139,11 +196,11 @@ class MainActivity : Activity() {
                     lastRows = rows
                     val stamp = SimpleDateFormat("EEE MMM d, h:mm a z", Locale.US).format(Date())
                     asOfText.text = "As of $stamp - Hyperliquid perps"
-                    if (rows.isEmpty()) {
-                        errorText.text = "No tracked holdings returned data."
+                    if (rows.isEmpty() && trackedKeys().isNotEmpty()) {
+                        errorText.text = "No tracked holdings returned data.\nTap to retry"
                         errorText.visibility = View.VISIBLE
                     }
-                    renderRows(rows)
+                    renderRows(rows, animate = true)
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -151,81 +208,176 @@ class MainActivity : Activity() {
                     // No stale numbers: leave the rows empty and show only the error.
                     lastRows = emptyList()
                     rowsContainer.removeAllViews()
+                    emptyState.visibility = View.GONE
                     asOfText.text = "Hyperliquid perps"
                     titleText.text = "Holdings"
                     errorText.text =
-                        "Could not load Hyperliquid data. Check your connection and try again."
+                        "Could not load Hyperliquid data. Check your connection and try again.\nTap to retry"
                     errorText.visibility = View.VISIBLE
                 }
             }
         }.start()
     }
 
-    private fun renderRows(rows: List<Row>) {
+    private fun renderRows(rows: List<Row>, animate: Boolean) {
         rowsContainer.removeAllViews()
+        emptyState.visibility =
+            if (rows.isEmpty() && trackedKeys().isEmpty()) View.VISIBLE else View.GONE
         if (rows.isEmpty()) return
         val maxAbs = (rows.maxOf { kotlin.math.abs(it.pct) }).coerceAtLeast(0.1)
         for (row in rows) {
-            rowsContainer.addView(buildRowView(row, maxAbs))
+            rowsContainer.addView(buildRowView(row, maxAbs, animate))
+        }
+        if (animate) {
+            // Rows fade in, staggered, while their bars grow (see buildRowView).
+            for (i in 0 until rowsContainer.childCount) {
+                val child = rowsContainer.getChildAt(i)
+                child.alpha = 0f
+                ObjectAnimator.ofFloat(child, "alpha", 0f, 1f).apply {
+                    duration = 200
+                    startDelay = i * 40L
+                    start()
+                }
+            }
         }
     }
 
-    private fun buildRowView(row: Row, maxAbs: Double): View {
-        val color = if (row.pct >= 0) Color.parseColor("#2e9e5b") else Color.parseColor("#c0392b")
-        val rowLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 10, 0, 10)
+    private fun barDrawable(color: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(color)
+            cornerRadius = 4f * resources.displayMetrics.density
         }
-        val label = TextView(this).apply {
-            text = "${row.label} ${formatPrice(row.price)}"
-            textSize = 14f
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2.2f)
-        }
-        val barHolder = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(0, 28, 2.0f)
-        }
-        val frac = (kotlin.math.abs(row.pct) / maxAbs).toFloat()
-        val bar = View(this).apply {
-            setBackgroundColor(color)
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, frac)
-        }
-        val spacer = View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f - frac)
-        }
-        barHolder.addView(bar)
-        barHolder.addView(spacer)
-        val pctText = TextView(this).apply {
-            text = formatPct(row.pct)
-            textSize = 14f
-            setTextColor(color)
-            textAlignment = View.TEXT_ALIGNMENT_VIEW_END
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
-        }
-        val remove = Button(this).apply {
-            text = "x"
-            textSize = 12f
-            setPadding(8, 0, 8, 0)
+    }
+
+    private fun selectableBackground(): Int {
+        val outValue = TypedValue()
+        theme.resolveAttribute(android.R.attr.selectableItemBackground, outValue, true)
+        return outValue.resourceId
+    }
+
+    private fun buildRowView(row: Row, maxAbs: Double, animate: Boolean): View {
+        val up = row.pct >= 0
+        val color = if (up) colGreen else colRed
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDrawable(R.drawable.card_bg)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(8) }
+            contentDescription =
+                "${row.label} ${formatPrice(row.price, row.key == "BTC")} ${formatPct(row.pct)}"
+        }
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val ticker = TextView(this).apply {
+            text = row.label
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(colText)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val price = TextView(this).apply {
+            text = formatPrice(row.price, row.key == "BTC")
+            textSize = 16f
+            typeface = Typeface.MONOSPACE
+            setTextColor(colText)
+            textAlignment = View.TEXT_ALIGNMENT_VIEW_END
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(8) }
+        }
+        val remove = TextView(this).apply {
+            text = "✕"
+            textSize = 16f
+            setTextColor(colMuted)
+            gravity = Gravity.CENTER
+            minWidth = dp(48)
+            minHeight = dp(48)
+            contentDescription = "Remove ${row.label}"
+            setBackgroundResource(selectableBackground())
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
             setOnClickListener {
                 val keys = trackedKeys()
                 keys.remove(row.key)
                 saveTracked(keys)
+                errorText.visibility = View.GONE
                 lastRows = lastRows.filter { it.key != row.key }
-                renderRows(lastRows)
+                renderRows(lastRows, animate = false)
             }
         }
-        rowLayout.addView(label)
-        rowLayout.addView(barHolder)
-        rowLayout.addView(pctText)
-        rowLayout.addView(remove)
-        return rowLayout
+        topRow.addView(ticker)
+        topRow.addView(price)
+        topRow.addView(remove)
+
+        val frac = (kotlin.math.abs(row.pct) / maxAbs).toFloat()
+        val bottomRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+        }
+        val track = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = getDrawable(R.drawable.track_bg)
+            layoutParams = LinearLayout.LayoutParams(0, dp(8), 1f)
+        }
+        val bar = View(this).apply {
+            background = barDrawable(color)
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, if (animate) 0f else frac
+            )
+        }
+        val spacer = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, if (animate) 1f else 1f - frac
+            )
+        }
+        track.addView(bar)
+        track.addView(spacer)
+        val pill = TextView(this).apply {
+            text = (if (up) "▲ " else "▼ ") + formatPct(row.pct)
+            textSize = 13f
+            typeface = Typeface.MONOSPACE
+            setTextColor(color)
+            background = getDrawable(if (up) R.drawable.pill_green else R.drawable.pill_red)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = dp(8) }
+        }
+        bottomRow.addView(track)
+        bottomRow.addView(pill)
+        card.addView(topRow)
+        card.addView(bottomRow)
+        if (animate) {
+            // Bars grow from zero to their proportional width.
+            ValueAnimator.ofFloat(0f, frac).apply {
+                duration = 350
+                addUpdateListener {
+                    val f = it.animatedValue as Float
+                    (bar.layoutParams as LinearLayout.LayoutParams).weight = f
+                    (spacer.layoutParams as LinearLayout.LayoutParams).weight = 1f - f
+                    bar.requestLayout()
+                    spacer.requestLayout()
+                }
+                start()
+            }
+        }
+        return card
     }
 
-    private fun formatPrice(price: Double): String {
-        return if (price >= 1000) {
+    private fun formatPrice(price: Double, isBtc: Boolean): String {
+        return if (isBtc) {
             "%,.0f".format(Locale.US, price)
         } else {
             "%.2f".format(Locale.US, price)
@@ -307,10 +459,20 @@ class MainActivity : Activity() {
             val item = Button(this).apply {
                 text = labelFor(key)
                 textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+                textSize = 14f
+                setTextColor(colText)
+                background = getDrawable(R.drawable.card_bg)
+                minHeight = dp(48)
+                setPadding(dp(12), dp(12), dp(12), dp(12))
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(4) }
                 setOnClickListener {
                     val keysNow = trackedKeys()
                     keysNow.add(key)
                     saveTracked(keysNow)
+                    hideKeyboard()
                     searchField.setText("")
                     fetch()
                 }

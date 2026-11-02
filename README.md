@@ -35,6 +35,20 @@ on a weekday). Weekend behavior is unchanged (Friday), but a Tuesday
 night now shows Tuesday's close, and the screen title names the actual
 baseline day. Market holidays are not accounted for in this version.
 
+Version 1.3 is UI/UX polish only, with no behavior changes: a dark
+trading-terminal theme (Views UI, no Compose rewrite), card rows on an
+8dp grid, tabular (monospace) numbers, percent pills with up/down arrows
+so color is not the only signal, consistent price formatting (BTC with
+thousands separators and 0 decimals, 2 decimals elsewhere), pull-to-
+refresh in addition to the Refresh button, rows that fade in with bars
+that grow to their values on refresh, an inline error banner with a tap
+to retry (still no stale numbers on failure), a designed empty state
+when nothing is tracked, search-field polish (clear button, keyboard
+search action, keyboard dismissal on pick), 48dp remove targets,
+edge-to-edge layout, and the footnote as a compact info section with
+the same wording. No sparklines, detail screens, sort options, widgets,
+alerts, or new data fields.
+
 ## Build
 
 Standard path (works on a normal machine with an Android SDK):
@@ -49,19 +63,20 @@ on every run, including a fresh Gradle home and a low heap), so the APK
 shipped here was built with the equivalent manual toolchain instead:
 
 ```
-aapt2 compile --dir app/src/main/res -o build12/compiled.zip
-aapt2 link -o build12/base.apk -I $SDK/platforms/android-34/android.jar \
-  --manifest app/src/main/AndroidManifest.xml --java build12/gen \
+aapt2 compile --dir app/src/main/res -o build13/compiled.zip
+aapt2 link -o build13/base.apk -I $SDK/platforms/android-34/android.jar \
+  --manifest app/src/main/AndroidManifest.xml --java build13/gen \
   --min-sdk-version 26 --target-sdk-version 34 \
-  --version-code 3 --version-name 1.2 build12/compiled.zip
+  --version-code 4 --version-name 1.3 build13/compiled.zip
 kotlinc app/src/main/java/com/marcel/hyperliquid/MainActivity.kt \
-  build12/gen/com/marcel/hyperliquid/R.java \
+  app/src/main/java/com/marcel/hyperliquid/PullScrollView.kt \
+  build13/gen/com/marcel/hyperliquid/R.java \
   -cp $SDK/platforms/android-34/android.jar -include-runtime \
-  -d build12/classes.jar
+  -d build13/classes.jar
 d8 --lib $SDK/platforms/android-34/android.jar --min-api 26 \
-  --output build12/dex build12/classes.jar
-# add build12/dex/classes.dex to base.apk, then zipalign + apksigner
-# (signed with build/debug.keystore, the same debug key as v1.0/v1.1)
+  --output build13/dex build13/classes.jar
+# add build13/dex/classes.dex to base.apk, then zipalign + apksigner
+# (signed with build/debug.keystore, the same debug key as v1.0/v1.1/v1.2)
 ```
 
 The project keeps standard AGP build files (`settings.gradle.kts`,
@@ -76,3 +91,6 @@ Gradle path works wherever the daemon runs.
 - `hyperliquid-holdings-debug-v1.2.apk` — v1.2, debug-signed, sideloadable.
   Same package, versionCode 3, signed with the same debug key as v1.0/v1.1,
   so it upgrades in place.
+- `hyperliquid-holdings-debug-v1.3.apk` — v1.3, debug-signed, sideloadable.
+  Same package, versionCode 4, signed with the same debug key, so it
+  upgrades in place. UI/UX polish only; no behavior changes.
